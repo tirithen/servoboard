@@ -7,6 +7,9 @@ var EventEmitter = require('events').EventEmitter,
 var ServoBoard = module.exports = function ServoBoard() {
 	this.device = '/dev/arduino';
 	this.baudrate = 115200;
+	this.reconnectTimer = 3000;
+	this.boardReady = false;
+	this.attemptReconnect = true;
 	this.servos = [];
 	for(var i = 0; i < 16; i++) {
 		this.servos.push(new Servo(i, this));
@@ -21,11 +24,13 @@ ServoBoard.prototype.__proto__ = EventEmitter.prototype;
 ServoBoard.prototype.connect = function() {
 	var self = this;
 
+	self.attemptReconnect = true;
+
 	self.connection = new SerialPort.SerialPort(self.device, {
 		baudrate: self.baudrate,
-		parser: SerialPort.parsers.readline('\r\n')
+		parser: SerialPort.parsers.readline('\n')
 	});
-//~ console.log(self);
+
 	self.connection.on('data', function(data) {
 		self._dataHandler(data);
 	});
@@ -36,14 +41,29 @@ ServoBoard.prototype.connect = function() {
 
 	self.connection.on('close', function() {
 		self.emit('disconnect');
+		self.boardReady = false;
+		self.connection = null;
+		if(self.attemptReconnect) {
+			self.connect();
+		}
 	});
+
+	setTimeout(function() {
+		if(!self.boardReady && self.attemptReconnect) {
+			self.connect();
+		}
+	}, self.reconnectTimer);
 };
 
 ServoBoard.prototype.disconnect = function() {
+	this.attemptReconnect = false;
+
 	if(this.connection) {
 		this.connection.close();
 		this.connection = null;
 	}
+
+	this.boardReady = false;
 };
 
 ServoBoard.prototype.debugEnable = function() {
@@ -72,29 +92,34 @@ ServoBoard.prototype.send = function(instruction) {
 		return false;
 	}
 
+	this.emit('send', instruction);
+
 	this.connection.write(instruction + '\n');
 };
 
 ServoBoard.prototype._dataHandler = function(data) {
-	data = data.split(',');
+	data = data.replace(/[\r\n\s]+$/, '').split(',');
 
-	if(data[0] === 'IN') { // The board returned an informative message
-		this.emit('info', data[1]);
-	}
-	else if(data[0] === 'ER') { // The board returned an error
-		this.emit('error', {
-			name: parseInt(data[1]),
-			message: data[2]
-		});
-	}
-	else if(data[0] === 'RY') { // The board is ready to recieve input
-		this.emit('connect');
-	}
-	else { // The board returned an unknown message
-		this.emit('error', {
-			name: 500,
-			message: 'Unknown message from board'
-		});
+	if(data && data[0]) {
+		if(data[0] === 'IN') { // The board returned an informative message
+			this.emit('info', data[1]);
+		}
+		else if(data[0] === 'ER') { // The board returned an error
+			this.emit('error', {
+				name: parseInt(data[1]),
+				message: data[2]
+			});
+		}
+		else if(data[0] === 'RY') { // The board is ready to recieve input
+			this.emit('connect');
+			this.boardReady = true;
+		}
+		else { // The board returned an unknown message
+			this.emit('error', {
+				name: 500,
+				message: 'Unknown message from board "' + data.join(',') + '"'
+			});
+		}
 	}
 };
 
@@ -134,4 +159,18 @@ Servo.prototype.setGoal = function(goal) {
 
 Servo.prototype.getGoal = function() {
 	return this._goal;
+};
+
+Servo.prototype.isEnabled = function() {
+	return this._isEnabled;
+};
+
+Servo.prototype.enable = function() {
+	this.servoBoard.send('SE,' + this.index);
+	this._isEnabled = true;
+};
+
+Servo.prototype.disable = function() {
+	this.servoBoard.send('SD,' + this.index);
+	this._isEnabled = false;
 };
