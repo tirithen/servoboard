@@ -2,3 +2,4 @@ build
 servoboard.hex
 servoboard.elf
 .sconsign.dblite
+node_modules

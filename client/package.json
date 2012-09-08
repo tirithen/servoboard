@@ -1,0 +1,19 @@
+{
+  "name": "servoboardclient",
+  "version": "0.0.0",
+  "description": "A test client for Servo Board",
+  "main": "client.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": "",
+  "keywords": [
+    "serial",
+    "arduino"
+  ],
+  "dependencies": {
+    "serialport": "1.0.7"
+  },
+  "author": "Fredrik Söderström <tirithen@gmail.com>",
+  "license": "GPLv3"
+}
