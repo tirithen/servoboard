@@ -9,20 +9,29 @@ servoBoard.on('info', function(data) {
 	console.log('Servo Board:', data);
 });
 
+servoBoard.on('send', function(data) {
+	console.log('Client:', data);
+});
+
 servoBoard.on('connect', function() {
 	var pos = 0;
 
 	console.log('Servo Board:', 'Connected!');
 
 	servoBoard.debugEnable();
+	for(var i = 0, l = servoBoard.servos.length; i < l; i++) {
+		servoBoard.servos[i].enable();
+	}
 
 	setInterval(function() {
-		pos += 100;
+		pos += 111;
 		if(pos > 999) {
 			pos = 0;
 		}
-		servoBoard.servos[4].setGoal(pos);
-	}, 2000);
+		for(var i = 0, l = servoBoard.servos.length; i < l; i++) {
+			servoBoard.servos[i].setGoal(pos);
+		}
+	}, 5000);
 });
 
 servoBoard.on('disconnect', function() {
