@@ -21,11 +21,19 @@
 #include <SPI.h>
 #include <digitalWriteFast.h>
 
-uint8_t spiDataPin = 11; // SPI MOSI ; use this instead of pin 2
-uint8_t spiClockPin = 13; // SPI SCLK ; use this instead of pin 3
-uint8_t spiLatchPin = 4; // SPI SS
+// SPI MOSI at pin 11
+// SPI SCLK at pin 13
+#define SPILATCHPIN 8 // SPI SS at pin 8
 
-bool timer2firstIteration = true;
+#define SERVOMINTIMEOUT 6200
+#define SERVOMAXTIMEOUT 59000
+#define SERVOCOUNT 16
+
+#define DEBUG
+
+#ifdef DEBUG
+bool debug = false;
+#endif
 
 typedef struct
 {
@@ -48,11 +56,6 @@ typedef struct
 	uint16_t timeout; // TODO: change to uint8_t if no more than 256 steps of resolution is possible
 } ServoGroup_t;
 
-#define SERVOMINTIMEOUT 6200;
-#define SERVOMAXTIMEOUT 59000;
-
-
-#define SERVOCOUNT 16
 ServoData_t servos[SERVOCOUNT];
 ServoGroup_t servoGroups[SERVOCOUNT];
 uint8_t servoOrder[SERVOCOUNT];
@@ -60,17 +63,28 @@ uint8_t servoOrder[SERVOCOUNT];
 uint8_t servoGroupIterator = 0;
 uint8_t servoGroupCount = 0;
 
+String serialInputString = "";
+bool serialInputStringComplete = false;
+typedef struct
+{
+	String code;
+	uint16_t arguments[2];
+} SerialInstruction_t;
+SerialInstruction_t serialInstruction;
+
+bool timer2firstIteration = true;
+
 void spi(uint16_t value) {
 	// Select the IC to tell it to expect data
-	digitalWriteFast(spiLatchPin, HIGH);
+	digitalWriteFast(SPILATCHPIN, HIGH);
 	// Send 8 bits, MSB first, pulsing the clock after each bit
 	SPI.transfer(highByte(value));
 	SPI.transfer(lowByte(value));
 	// Lower the latch to apply the changes
-	digitalWriteFast(spiLatchPin, LOW);
+	digitalWriteFast(SPILATCHPIN, LOW);
 }
 
-ISR(TIMER1_COMPA_vect)
+ISR(TIMER1_COMPA_vect) // This interrupt runs when it's time to stop the current servo group or stops this timer if all groups are done
 {
 	if(servoGroupIterator < servoGroupCount) {
 		spi(servoGroups[servoGroupIterator].controlMask);
@@ -149,27 +163,189 @@ void updateServoOrder()
 	}
 }
 
-void setServoGoal(uint8_t index, uint16_t goal, bool updateOrder)
+bool setServoGoal(uint8_t index, uint16_t goal, bool updateOrder)
 {
-	if(index < SERVOCOUNT) {
+	if(index < SERVOCOUNT && goal < 1000) {
 		servos[index].goal = goal;
-		servos[index].timeout = map(goal, 0, 1023, servos[index].minTimeout, servos[index].maxTimeout);
+		servos[index].timeout = map(goal, 0, 999, servos[index].minTimeout, servos[index].maxTimeout);
 
 		if(updateOrder) {
 			updateServoOrder();
 			calculateServoGroups();
 		}
+
+		return true;
+	}
+	else {
+		return false;
 	}
 }
 
-void setInitialServoValues()
+void setupServosAndServoGroups()
 {
-	for(uint8_t i = 0; i < SERVOCOUNT; i++) {
+	uint8_t i;
+	for(i = 0; i < SERVOCOUNT; i++) {
+		// Setup servo group
+		servoGroups[i].timeout = 0;
+		servoGroups[i].controlMask = 0;
+		servoOrder[i] = i;
+
+		// Setup servo
 		servos[i].isEnabled = true;
 		servos[i].controlMask = 1 << i;
 		servos[i].minTimeout = SERVOMINTIMEOUT;
 		servos[i].maxTimeout = SERVOMAXTIMEOUT;
 		setServoGoal(i, 511, false);
+	}
+}
+
+void sendHelp()
+{
+	Serial.println("Input");
+	Serial.println("-----");
+	Serial.println("HE - Show this message");
+	Serial.println("SS,<id 0-15>,<pos 0-999> - Set servo goal");
+#ifdef DEBUG
+	Serial.println("DE - Debug enable (only in debug)");
+	Serial.println("DD - Debug disable (only in debug)");
+#endif
+	Serial.println("");
+	Serial.println("Output");
+	Serial.println("------");
+	Serial.println("IN,<message> - Info message");
+	Serial.println("ER,<code>,<message> - Error message");
+	//Serial.println("SP,<pos> * 16 - All 16 servo positions");
+	//Serial.println("SG,<goal> * 16 - All 16 servo goals");
+	//Serial.println("SL,<load> * 16 - All 16 servo loads");
+	Serial.println("");
+}
+
+void sendServoGoals()
+{
+	uint8_t i;
+
+	Serial.print("SG");
+	for(i = 0; i < SERVOCOUNT; i++) {
+		Serial.print(",");
+		Serial.print(servos[i].goal);
+	}
+	Serial.println("");
+}
+
+int stringToInt(String str)
+{
+	uint8_t length = str.length() + 1;
+	char strCharArray[length];
+
+	str.toCharArray(strCharArray, length);
+
+	return atoi(strCharArray);
+}
+
+void serialInputStringToInstruction()
+{
+	uint8_t i = 0;
+	uint8_t j = 0;
+	String buffer = "";
+	serialInstruction.code = "";
+	serialInstruction.arguments[0] = 0;
+	serialInstruction.arguments[1] = 0;
+
+	while(serialInputString[i] != '\n')
+	{
+		if(serialInputString[i] == ',' && j < 2) {
+			if(j == 0) { // If instruction name
+				serialInstruction.code = buffer;
+			}
+			else {
+				serialInstruction.arguments[j - 1] = stringToInt(buffer);
+			}
+			buffer = "";
+			j++;
+		}
+		else {
+			buffer += serialInputString[i];
+		}
+
+		i++;
+	}
+
+	if(j == 0) {
+		serialInstruction.code = buffer;
+	}
+	else if(j < 3) {
+		serialInstruction.arguments[j - 1] = stringToInt(buffer);
+	}
+}
+
+void serialEvent() // Serial data handler
+{
+	while(Serial.available()) {
+		char inputCharacter = (char)Serial.read();
+		if(inputCharacter == '\n') {
+			serialInputString += '\n';
+			serialInputStringToInstruction();
+			serialInputStringComplete = true;
+		}
+		else {
+			serialInputString += inputCharacter;
+		}
+	}
+}
+
+void serialInputHandler()
+{
+	if(serialInputStringComplete == true) {
+#ifdef DEBUG
+		if(debug == true) {
+			Serial.print("IN,Input recieved: ");
+			Serial.print(serialInputString);
+			Serial.print("IN,Input interpreted as: ");
+			Serial.print(serialInstruction.code);
+			Serial.print(" ");
+			Serial.print(serialInstruction.arguments[0]);
+			Serial.print(" ");
+			Serial.println(serialInstruction.arguments[1]);
+		}
+#endif
+		if(serialInstruction.code == "SS") {
+			if(setServoGoal(
+				serialInstruction.arguments[0],
+				serialInstruction.arguments[1],
+				true
+			)) {
+#ifdef DEBUG
+				if(debug == true) {
+					Serial.print("IN,Servo ");
+					Serial.print(serialInstruction.arguments[0]);
+					Serial.print(" goal set to ");
+					Serial.println(serialInstruction.arguments[1]);
+				}
+#endif
+			}
+			else {
+				Serial.println("ER,410,SS invalid args");
+			}
+		}
+		else if(serialInstruction.code == "HE") {
+			sendHelp();
+		}
+#ifdef DEBUG
+		else if(serialInstruction.code == "DE") {
+			debug = true;
+			Serial.println("IN,Debug enabled");
+		}
+		else if(serialInstruction.code == "DD") {
+			debug = false;
+			Serial.println("IN,Debug disabled");
+		}
+#endif
+		else {
+			Serial.println("ER,400,Invalid input");
+		}
+
+		serialInputStringComplete = false;
+		serialInputString = "";
 	}
 }
 
@@ -204,29 +380,25 @@ void setup()
 	TIMSK2 |= _BV(OCIE2A);	// Enable timer 2 compare A interrupt
 
 	// Setup SPI
-	pinModeFast(spiLatchPin, OUTPUT);
-	digitalWriteFast(spiLatchPin, LOW);
+	pinModeFast(SPILATCHPIN, OUTPUT);
 	SPI.setBitOrder(MSBFIRST); // Transmit most significant bit first when sending data with SPI
 	SPI.setClockDivider(SPI_CLOCK_DIV2);
 	SPI.begin();
 
 	// Setup the servo pin/mask configurations
 	// TODO: setup up servos
-	uint8_t i;
-	for(i = 0; i < SERVOCOUNT; i++) {
-		servoGroups[i].timeout = 0;
-		servoGroups[i].controlMask = 0;
-		servoOrder[i] = i;
-	}
-	setInitialServoValues();
+	setupServosAndServoGroups();
 	// TODO: read calibration data
 	// TODO: read initial servo goals from eeprom or set to some standard value
 	updateServoOrder();
 	calculateServoGroups();
 
+	Serial.println("IN,Servo Board started. Send \"HE\" and \\n for help");
+
 	interrupts();
 }
 
-void loop()
-{
+void loop() {
+	serialInputHandler();
+	//sendServoGoals();
 }
