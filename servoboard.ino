@@ -28,6 +28,7 @@
 #define SERVOMINTIMEOUT 6200
 #define SERVOMAXTIMEOUT 59000
 #define SERVOCOUNT 16
+#define SERVOMAXGOAL 999
 
 #define DEBUG
 
@@ -165,9 +166,9 @@ void updateServoOrder()
 
 bool setServoGoal(uint8_t index, uint16_t goal, bool updateOrder)
 {
-	if(index < SERVOCOUNT && goal < 1000) {
+	if(index < SERVOCOUNT && goal <= SERVOMAXGOAL) {
 		servos[index].goal = goal;
-		servos[index].timeout = map(goal, 0, 999, servos[index].minTimeout, servos[index].maxTimeout);
+		servos[index].timeout = map(goal, 0, SERVOMAXGOAL, servos[index].minTimeout, servos[index].maxTimeout);
 
 		if(updateOrder) {
 			updateServoOrder();
@@ -191,11 +192,10 @@ void setupServosAndServoGroups()
 		servoOrder[i] = i;
 
 		// Setup servo
-		servos[i].isEnabled = true;
 		servos[i].controlMask = 1 << i;
 		servos[i].minTimeout = SERVOMINTIMEOUT;
 		servos[i].maxTimeout = SERVOMAXTIMEOUT;
-		setServoGoal(i, 511, false);
+		setServoGoal(i, 0, false);
 	}
 }
 
@@ -205,6 +205,8 @@ void sendHelp()
 	Serial.println("-----");
 	Serial.println("HE - Show this message");
 	Serial.println("SG,<id 0-15>,<pos 0-999> - Set servo goal");
+	Serial.println("SE,<id 0-15> - Enable servo");
+	Serial.println("SD,<id 0-15> - Disable servo");
 #ifdef DEBUG
 	Serial.println("DE - Debug enable (only in debug)");
 	Serial.println("DD - Debug disable (only in debug)");
@@ -286,8 +288,6 @@ void serialInputHandler()
 	if(serialInputStringComplete == true) {
 #ifdef DEBUG
 		if(debug == true) {
-			Serial.print("IN,Input recieved: ");
-			Serial.print(serialInputString);
 			Serial.print("IN,Input interpreted as: ");
 			Serial.print(serialInstruction.code);
 			Serial.print(" ");
@@ -315,20 +315,44 @@ void serialInputHandler()
 				Serial.println("ER,410,SS invalid args");
 			}
 		}
-		else if(serialInstruction.code == "HE") {
+		else if(serialInstruction.code == "SE") { // Enable servo
+			if(serialInstruction.arguments[0] < SERVOCOUNT) {
+				servos[serialInstruction.arguments[0]].isEnabled = true;
+			}
+#ifdef DEBUG
+				if(debug == true) {
+					Serial.print("IN,Servo ");
+					Serial.print(serialInstruction.arguments[0]);
+					Serial.println(" enabled");
+				}
+#endif
+		}
+		else if(serialInstruction.code == "SD") { // Disable servo
+			if(serialInstruction.arguments[0] < SERVOCOUNT) {
+				servos[serialInstruction.arguments[0]].isEnabled = false;
+			}
+#ifdef DEBUG
+				if(debug == true) {
+					Serial.print("IN,Servo ");
+					Serial.print(serialInstruction.arguments[0]);
+					Serial.println(" disabled");
+				}
+#endif
+		}
+		else if(serialInstruction.code == "HE") { // Show help
 			sendHelp();
 		}
 #ifdef DEBUG
-		else if(serialInstruction.code == "DE") {
+		else if(serialInstruction.code == "DE") { // Enable debug
 			debug = true;
 			Serial.println("IN,Debug enabled");
 		}
-		else if(serialInstruction.code == "DD") {
+		else if(serialInstruction.code == "DD") { // Disable debug
 			debug = false;
 			Serial.println("IN,Debug disabled");
 		}
 #endif
-		else {
+		else { // Unknown input
 			Serial.println("ER,400,Invalid input");
 		}
 
@@ -381,8 +405,9 @@ void setup()
 	updateServoOrder();
 	calculateServoGroups();
 
-	Serial.println("RY"); // Send ready message
+	Serial.println("");
 	Serial.println("IN,Servo Board started. Send \"HE\" and new line for help");
+	Serial.println("RY"); // Send ready message
 
 	interrupts();
 }
