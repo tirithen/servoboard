@@ -9,6 +9,7 @@ This is the code for an Arduino based servo controller board. The borad supports
 - SCons
 - Python
 - pyserial
+- avrdude
 
 
 ## Setup
