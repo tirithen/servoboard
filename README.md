@@ -30,6 +30,11 @@ To upload the binary to the Arduino type:
 
 	$ ./buildproject upload
 
+
+## Hardware
+The hardware schematics are being developed on Upverter [here](http://upverter.com/tirithen/fa5b6d5bb2f373fc/servoboard/)
+
+
 ## License
 
 The code is released under the GPLv3 license.
