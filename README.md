@@ -32,7 +32,7 @@ To upload the binary to the Arduino type:
 
 
 ## Hardware
-The hardware schematics are being developed on Upverter [here](http://upverter.com/tirithen/fa5b6d5bb2f373fc/servoboard/)
+The hardware schematics are being developed on Upverter [here](http://upverter.com/tirithen/fa5b6d5bb2f373fc/servoboard/).
 
 
 ## License
