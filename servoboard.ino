@@ -204,7 +204,7 @@ void sendHelp()
 	Serial.println("Input");
 	Serial.println("-----");
 	Serial.println("HE - Show this message");
-	Serial.println("SS,<id 0-15>,<pos 0-999> - Set servo goal");
+	Serial.println("SG,<id 0-15>,<pos 0-999> - Set servo goal");
 #ifdef DEBUG
 	Serial.println("DE - Debug enable (only in debug)");
 	Serial.println("DD - Debug disable (only in debug)");
@@ -212,23 +212,11 @@ void sendHelp()
 	Serial.println("");
 	Serial.println("Output");
 	Serial.println("------");
+	Serial.println("RY - Ready for input");
 	Serial.println("IN,<message> - Info message");
 	Serial.println("ER,<code>,<message> - Error message");
 	//Serial.println("SP,<pos> * 16 - All 16 servo positions");
-	//Serial.println("SG,<goal> * 16 - All 16 servo goals");
 	//Serial.println("SL,<load> * 16 - All 16 servo loads");
-	Serial.println("");
-}
-
-void sendServoGoals()
-{
-	uint8_t i;
-
-	Serial.print("SG");
-	for(i = 0; i < SERVOCOUNT; i++) {
-		Serial.print(",");
-		Serial.print(servos[i].goal);
-	}
 	Serial.println("");
 }
 
@@ -308,7 +296,7 @@ void serialInputHandler()
 			Serial.println(serialInstruction.arguments[1]);
 		}
 #endif
-		if(serialInstruction.code == "SS") {
+		if(serialInstruction.code == "SG") {
 			if(setServoGoal(
 				serialInstruction.arguments[0],
 				serialInstruction.arguments[1],
@@ -393,12 +381,12 @@ void setup()
 	updateServoOrder();
 	calculateServoGroups();
 
-	Serial.println("IN,Servo Board started. Send \"HE\" and \\n for help");
+	Serial.println("RY"); // Send ready message
+	Serial.println("IN,Servo Board started. Send \"HE\" and new line for help");
 
 	interrupts();
 }
 
 void loop() {
 	serialInputHandler();
-	//sendServoGoals();
 }
