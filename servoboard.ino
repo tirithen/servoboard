@@ -21,34 +21,57 @@
 #include <SPI.h>
 #include <digitalWriteFast.h>
 
+#define DEBUG // Remove to disable debug code
+
+#ifdef DEBUG
+bool debugOutput = false;
+#endif
+
 // SPI MOSI at pin 11
 // SPI SCLK at pin 13
 #define SPILATCHPIN 8 // SPI SS at pin 8
 
-#define SERVOMINTIMEOUT 6200
-#define SERVOMAXTIMEOUT 59000
-#define SERVOCOUNT 16
-#define SERVOMAXGOAL 999
+#define SERVO_MIN_TIMEOUT 6200
+#define SERVO_MAX_TIMEOUT 59000
+#define SERVO_COUNT 16
+#define SERVO_MAX_GOAL 254
 
-#define DEBUG
+#define MAX_SERIAL_INSTRUCTION_LENGTH 18
+#define INSTRUCTION_END_OF_INSTRUCTION 255
 
 #ifdef DEBUG
-bool debug = false;
+#define INSTRUCTION_INPUT_DEBUG_ENABLE			0
+#define INSTRUCTION_INPUT_DEBUG_DISABLE			1
 #endif
+#define INSTRUCTION_INPUT_SET_ID				2
+#define INSTRUCTION_INPUT_SERVOS_GOAL			3
+#define INSTRUCTION_INPUT_SERVOS_ENABLED		4
+#define INSTRUCTION_INPUT_SERVOS_CALIBRATE		5
+
+#define INSTRUCTION_OUTPUT_READY				0
+#define INSTRUCTION_OUTPUT_INFO					1
+#define INSTRUCTION_OUTPUT_DEBUG				2
+#define INSTRUCTION_OUTPUT_ERROR				3
+#define INSTRUCTION_OUTPUT_ALL_SERVOS_POSITION	4
+#define INSTRUCTION_OUTPUT_ALL_SERVOS_LOAD		5
+
+#define INSTRUCTION_ERROR_UNKNOWN 0
+//#define INSTRUCTION_ERROR_NO_CONNECTION 1 // Client only error
+#define INSTRUCTION_ERROR_INSTRUCTION_ILLEGAL 2
+//#define INSTRUCTION_ERROR_RESPONSE_ILLEGAL 3 // Client only error
 
 typedef struct
 {
-	// TODO: add calibration min/max values for control, position and load
-	bool isEnabled; // TODO: implement
+	bool isEnabled;
 	uint16_t controlMask;
 	//uint8_t positionPin; // TODO: implement
 	//uint8_t loadPin; // TODO: implement
-	uint16_t goal;
+	uint8_t goal;
 	uint16_t timeout;
 	uint16_t minTimeout;
 	uint16_t maxTimeout;
-	//uint16_t latestPosition; // TODO: implement10000
-	//uint16_t latestLoad; // TODO: implement
+	uint8_t position;
+	uint8_t load;
 } ServoData_t;
 
 typedef struct
@@ -57,23 +80,18 @@ typedef struct
 	uint16_t timeout; // TODO: change to uint8_t if no more than 256 steps of resolution is possible
 } ServoGroup_t;
 
-ServoData_t servos[SERVOCOUNT];
-ServoGroup_t servoGroups[SERVOCOUNT];
-uint8_t servoOrder[SERVOCOUNT];
+ServoData_t servos[SERVO_COUNT];
+ServoGroup_t servoGroups[SERVO_COUNT];
+uint8_t servoOrder[SERVO_COUNT];
 
 uint8_t servoGroupIterator = 0;
 uint8_t servoGroupCount = 0;
 
-String serialInputString = "";
-bool serialInputStringComplete = false;
-typedef struct
-{
-	String code;
-	uint16_t arguments[2];
-} SerialInstruction_t;
-SerialInstruction_t serialInstruction;
-
 bool timer2firstIteration = true;
+
+uint8_t serialInstruction[MAX_SERIAL_INSTRUCTION_LENGTH];
+
+uint8_t boardId = 0; // TODO: save this value to EEPROM
 
 void spi(uint16_t value) {
 	// Select the IC to tell it to expect data
@@ -129,7 +147,7 @@ void calculateServoGroups()
 
 	servoGroupCount = 0;
 
-	for(i = 0; i < SERVOCOUNT; i++) {
+	for(i = 0; i < SERVO_COUNT; i++) {
 		j = servoOrder[i];
 		if(servos[j].isEnabled) {
 			deltaTimeout = servos[j].timeout - prevTimeout;
@@ -153,8 +171,8 @@ void updateServoOrder()
 	uint8_t tmp = 0;
 
 	// TODO: refactor into a faster algorithm should be possible
-	for(i = 0; i < SERVOCOUNT; i++) {
-		for(j = 0; j < SERVOCOUNT; j++) {
+	for(i = 0; i < SERVO_COUNT; i++) {
+		for(j = 0; j < SERVO_COUNT; j++) {
 			if(i != j && servos[servoOrder[j]].timeout > servos[servoOrder[i]].timeout) {
 				tmp = servoOrder[j];
 				servoOrder[j] = servoOrder[i];
@@ -166,9 +184,9 @@ void updateServoOrder()
 
 bool setServoGoal(uint8_t index, uint16_t goal, bool updateOrder)
 {
-	if(index < SERVOCOUNT && goal <= SERVOMAXGOAL) {
+	if(index < SERVO_COUNT && goal <= SERVO_MAX_GOAL) {
 		servos[index].goal = goal;
-		servos[index].timeout = map(goal, 0, SERVOMAXGOAL, servos[index].minTimeout, servos[index].maxTimeout);
+		servos[index].timeout = map(goal, 0, SERVO_MAX_GOAL, servos[index].minTimeout, servos[index].maxTimeout);
 
 		if(updateOrder) {
 			updateServoOrder();
@@ -185,7 +203,7 @@ bool setServoGoal(uint8_t index, uint16_t goal, bool updateOrder)
 void setupServosAndServoGroups()
 {
 	uint8_t i;
-	for(i = 0; i < SERVOCOUNT; i++) {
+	for(i = 0; i < SERVO_COUNT; i++) {
 		// Setup servo group
 		servoGroups[i].timeout = 0;
 		servoGroups[i].controlMask = 0;
@@ -193,33 +211,10 @@ void setupServosAndServoGroups()
 
 		// Setup servo
 		servos[i].controlMask = 1 << i;
-		servos[i].minTimeout = SERVOMINTIMEOUT;
-		servos[i].maxTimeout = SERVOMAXTIMEOUT;
+		servos[i].minTimeout = SERVO_MIN_TIMEOUT;
+		servos[i].maxTimeout = SERVO_MAX_TIMEOUT;
 		setServoGoal(i, 0, false);
 	}
-}
-
-void sendHelp()
-{
-	Serial.println("Input");
-	Serial.println("-----");
-	Serial.println("HE - Show this message");
-	Serial.println("SG,<id 0-15>,<pos 0-999> - Set servo goal");
-	Serial.println("SE,<id 0-15> - Enable servo");
-	Serial.println("SD,<id 0-15> - Disable servo");
-#ifdef DEBUG
-	Serial.println("DE - Debug enable (only in debug)");
-	Serial.println("DD - Debug disable (only in debug)");
-#endif
-	Serial.println("");
-	Serial.println("Output");
-	Serial.println("------");
-	Serial.println("RY - Ready for input");
-	Serial.println("IN,<message> - Info message");
-	Serial.println("ER,<code>,<message> - Error message");
-	//Serial.println("SP,<pos> * 16 - All 16 servo positions");
-	//Serial.println("SL,<load> * 16 - All 16 servo loads");
-	Serial.println("");
 }
 
 int stringToInt(String str)
@@ -232,133 +227,94 @@ int stringToInt(String str)
 	return atoi(strCharArray);
 }
 
-void serialInputStringToInstruction()
-{
-	uint8_t i = 0;
-	uint8_t j = 0;
-	String buffer = "";
-	serialInstruction.code = "";
-	serialInstruction.arguments[0] = 0;
-	serialInstruction.arguments[1] = 0;
-
-	while(serialInputString[i] != '\n')
-	{
-		if(serialInputString[i] == ',' && j < 2) {
-			if(j == 0) { // If instruction name
-				serialInstruction.code = buffer;
-			}
-			else {
-				serialInstruction.arguments[j - 1] = stringToInt(buffer);
-			}
-			buffer = "";
-			j++;
-		}
-		else {
-			buffer += serialInputString[i];
-		}
-
-		i++;
-	}
-
-	if(j == 0) {
-		serialInstruction.code = buffer;
-	}
-	else if(j < 3) {
-		serialInstruction.arguments[j - 1] = stringToInt(buffer);
-	}
-}
-
 void serialEvent() // Serial data handler
 {
+	uint8_t i = 0;
 	while(Serial.available()) {
-		char inputCharacter = (char)Serial.read();
-		if(inputCharacter == '\n') {
-			serialInputString += '\n';
-			serialInputStringToInstruction();
-			serialInputStringComplete = true;
+		serialInstruction[i] = (uint8_t) Serial.read();
+		if(serialInstruction[i] == INSTRUCTION_END_OF_INSTRUCTION) {
+			serialInputHandler();
+			break;
 		}
+		i++;
+	}
+}
+
+void serialInputHandler() {
+	uint8_t i;
+
+	if(serialInstruction[0] >> 4 == boardId) { // If the first 4 bits matches this board id, continiue
+		serialInstruction[0] &= 0x00ff; // Remove the board id from the first byte, leave the instruction bits
+
+		if(serialInstruction[0] == INSTRUCTION_INPUT_SERVOS_GOAL) {
+			i = 1;
+
+			while(serialInstruction[i] != INSTRUCTION_END_OF_INSTRUCTION) {
+				setServoGoal(i - 1, serialInstruction[i], false);
+				i++;
+			}
+
+			updateServoOrder();
+			calculateServoGroups();
+		}
+		else if(serialInstruction[0] == INSTRUCTION_INPUT_SERVOS_ENABLED) {
+			for(i = 0; i < SERVO_COUNT; i++) {
+				if(((serialInstruction[1] >> i) & 1) == 1) {
+					servos[i].isEnabled = true;
+				}
+				else {
+					servos[i].isEnabled = false;
+				}
+			}
+		}
+		else if(serialInstruction[0] == INSTRUCTION_INPUT_SERVOS_CALIBRATE) {
+			for(i = 0; i < SERVO_COUNT; i++) {
+				if(((serialInstruction[1] >> i) & 1) == 1) {
+					// TODO: Calibrate servo
+				}
+			}
+		}
+		else if(serialInstruction[0] == INSTRUCTION_INPUT_SET_ID) {
+			if(serialInstruction[1] < 16) {
+				boardId = serialInstruction[1];
+			}
+			else {
+				// Send error
+			}
+		}
+#ifdef DEBUG
+		else if(serialInstruction[0] == INSTRUCTION_INPUT_DEBUG_ENABLE) {
+			debugOutput = true;
+		}
+		else if(serialInstruction[0] == INSTRUCTION_INPUT_DEBUG_DISABLE) {
+			debugOutput = false;
+		}
+#endif
 		else {
-			serialInputString += inputCharacter;
+			// Output illegal instruction error
+			Serial.print((boardId << 4) + INSTRUCTION_OUTPUT_ERROR);
+			Serial.print(INSTRUCTION_ERROR_INSTRUCTION_ILLEGAL);
+			Serial.print(INSTRUCTION_END_OF_INSTRUCTION);
 		}
 	}
 }
 
-void serialInputHandler()
-{
-	if(serialInputStringComplete == true) {
-#ifdef DEBUG
-		if(debug == true) {
-			Serial.print("IN,Input interpreted as: ");
-			Serial.print(serialInstruction.code);
-			Serial.print(" ");
-			Serial.print(serialInstruction.arguments[0]);
-			Serial.print(" ");
-			Serial.println(serialInstruction.arguments[1]);
-		}
-#endif
-		if(serialInstruction.code == "SG") {
-			if(setServoGoal(
-				serialInstruction.arguments[0],
-				serialInstruction.arguments[1],
-				true
-			)) {
-#ifdef DEBUG
-				if(debug == true) {
-					Serial.print("IN,Servo ");
-					Serial.print(serialInstruction.arguments[0]);
-					Serial.print(" goal set to ");
-					Serial.println(serialInstruction.arguments[1]);
-				}
-#endif
-			}
-			else {
-				Serial.println("ER,410,SS invalid args");
-			}
-		}
-		else if(serialInstruction.code == "SE") { // Enable servo
-			if(serialInstruction.arguments[0] < SERVOCOUNT) {
-				servos[serialInstruction.arguments[0]].isEnabled = true;
-			}
-#ifdef DEBUG
-				if(debug == true) {
-					Serial.print("IN,Servo ");
-					Serial.print(serialInstruction.arguments[0]);
-					Serial.println(" enabled");
-				}
-#endif
-		}
-		else if(serialInstruction.code == "SD") { // Disable servo
-			if(serialInstruction.arguments[0] < SERVOCOUNT) {
-				servos[serialInstruction.arguments[0]].isEnabled = false;
-			}
-#ifdef DEBUG
-				if(debug == true) {
-					Serial.print("IN,Servo ");
-					Serial.print(serialInstruction.arguments[0]);
-					Serial.println(" disabled");
-				}
-#endif
-		}
-		else if(serialInstruction.code == "HE") { // Show help
-			sendHelp();
-		}
-#ifdef DEBUG
-		else if(serialInstruction.code == "DE") { // Enable debug
-			debug = true;
-			Serial.println("IN,Debug enabled");
-		}
-		else if(serialInstruction.code == "DD") { // Disable debug
-			debug = false;
-			Serial.println("IN,Debug disabled");
-		}
-#endif
-		else { // Unknown input
-			Serial.println("ER,400,Invalid input");
-		}
-
-		serialInputStringComplete = false;
-		serialInputString = "";
+void serialOutputServoPositions() { // Output servo positions
+	uint8_t i;
+	Serial.print((boardId << 4) + INSTRUCTION_OUTPUT_ALL_SERVOS_POSITION);
+	for(i = 0; i < SERVO_COUNT; i++) {
+		Serial.print(servos[i].position);
 	}
+	Serial.print(INSTRUCTION_END_OF_INSTRUCTION);
+}
+
+void serialOutputServoLoads() { // Output servo loads
+	uint8_t i;
+	Serial.print((boardId << 4) + INSTRUCTION_OUTPUT_ALL_SERVOS_LOAD);
+	for(i = 0; i < SERVO_COUNT; i++) {
+		Serial.print(servos[i].load);
+	}
+	Serial.print(INSTRUCTION_END_OF_INSTRUCTION);
 }
 
 void setup()
@@ -400,18 +356,24 @@ void setup()
 	// Setup the servo pin/mask configurations
 	// TODO: setup up servos
 	setupServosAndServoGroups();
-	// TODO: read calibration data
-	// TODO: read initial servo goals from eeprom or set to some standard value
+	// TODO: read calibration data from eeprom
+	// TODO: read initial servo goals from eeprom
+	// TODO: read which servos that are enabled from eeprom
 	updateServoOrder();
 	calculateServoGroups();
 
-	Serial.println("");
-	Serial.println("IN,Servo Board started. Send \"HE\" and new line for help");
-	Serial.println("RY"); // Send ready message
+	// Output end of instruction byte to make sure listners are in sync
+	// TODO: figure out if this is working
+	Serial.print(INSTRUCTION_END_OF_INSTRUCTION);
+
+	// Output servo board ready
+	Serial.print((boardId << 4) + INSTRUCTION_OUTPUT_READY);
+	Serial.print(INSTRUCTION_END_OF_INSTRUCTION);
 
 	interrupts();
 }
 
 void loop() {
-	serialInputHandler();
+	serialOutputServoPositions();
+	serialOutputServoLoads();
 }

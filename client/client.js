@@ -20,16 +20,16 @@ servoBoard.on('connect', function() {
 
 	servoBoard.debugEnable();
 	for(var i = 0, l = servoBoard.servos.length; i < l; i++) {
-		servoBoard.servos[i].enable();
+		servoBoard.servos[i].isEnabled = true;
 	}
 
 	setInterval(function() {
-		pos += 111;
-		if(pos > 999) {
+		pos += .1;
+		if(pos > 1) {
 			pos = 0;
 		}
 		for(var i = 0, l = servoBoard.servos.length; i < l; i++) {
-			servoBoard.servos[i].setGoal(pos);
+			servoBoard.servos[i].goal = pos;
 		}
 	}, 5000);
 });
