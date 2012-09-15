@@ -12,7 +12,7 @@ var ServoBoard = module.exports = function ServoBoard() {
 	this.baudrate = 115200;
 	this.reconnectDelay = 3000; // Millisecond to automatic reconnect attempt
 	this.sendRetryDelay = 20; // Milliseconds to check if there is anything to send
-	this.servoUpdateDelay = 20 // Milliseconds to enqueue new servo goals/enable/disable/calibrate
+	this.servoUpdateDelay = 20; // Milliseconds to enqueue new servo goals/enable/disable/calibrate
 
 	// Setup
 	this._id = 0; // Must be 0-15
@@ -73,29 +73,71 @@ ServoBoard.prototype.instructions = {
 		RESPONSE_ILLEGAL: {
 			code: 3,
 			message: 'Servo board returned an illegal response'
+		},
+		INVALID_BOARD_ID: {
+			code: 4,
+			message: 'Illegal servo board id, must be a number between 0-15'
 		}
 	}
 };
 
-ServoBoard.prototype.connect = function() {
+ServoBoard.prototype.serialParser = function (delimiter) {
+	var	self = this,
+		data = [];
+
+	if(delimiter === undefined || delimiter === null) {
+		delimiter = '\n';
+	}
+
+	return function (emitter, buffer) {
+		var i, l, instructions = [[]], j = 0,
+			END_OF_INSTRUCTION = self.instructions.END_OF_INSTRUCTION;
+
+		for(i = 0, l = buffer.length; i < l; i++) {
+			data.push(buffer[i]);
+		}
+
+		for(i = 0, l = data.length; i < l; i++) {
+			if(data[i] === END_OF_INSTRUCTION) {
+				j++;
+				instructions.push([]);
+			}
+			else {
+				instructions[j].push(data[i]);
+			}
+		}
+
+		data = instructions.pop();
+
+		instructions.forEach(function (instruction) {
+//~ console.log('raw ->', instruction);
+			emitter.emit('data', instruction);
+		});
+	};
+};
+
+ServoBoard.prototype.connect = function () {
 	var self = this;
 
 	self.attemptReconnect = true;
 
 	self._connection = new SerialPort.SerialPort(self.device, {
 		baudrate: self.baudrate,
-		parser: SerialPort.parsers.readline(self.instructions.END_OF_INSTRUCTION)
+		parser: self.serialParser(self.instructions.END_OF_INSTRUCTION)
+		//~ parser: SerialPort.parsers.raw
 	});
 
-	self._connection.on('data', function(data) {
-		self._dataHandler(data);
+	self._connection.on('data', function (data) {
+		if(data.length > 0) {
+			self._dataHandler(data);
+		}
 	});
 
-	self._connection.on('error', function(error) {
+	self._connection.on('error', function (error) {
 		self._errorHandler(error);
 	});
 
-	self._connection.on('close', function() {
+	self._connection.on('close', function () {
 		self.emit('disconnect');
 		self._boardReady = false;
 		self._connection = null;
@@ -104,14 +146,14 @@ ServoBoard.prototype.connect = function() {
 		}
 	});
 
-	setTimeout(function() {
+	setTimeout(function () {
 		if(!self._boardReady && self.attemptReconnect) {
 			self.connect();
 		}
 	}, self.reconnectDelay);
 };
 
-ServoBoard.prototype.disconnect = function() {
+ServoBoard.prototype.disconnect = function () {
 	this._attemptReconnect = false;
 
 	if(this._connection) {
@@ -122,7 +164,7 @@ ServoBoard.prototype.disconnect = function() {
 	this._boardReady = false;
 };
 
-ServoBoard.prototype.map = function(x, inMin, inMax, outMin, outMax, round) {
+ServoBoard.prototype.map = function (x, inMin, inMax, outMin, outMax, round) {
 	var result = (x - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
 
 	if(round) {
@@ -132,15 +174,16 @@ ServoBoard.prototype.map = function(x, inMin, inMax, outMin, outMax, round) {
 	return result;
 };
 
-ServoBoard.prototype._servoUpdate = function() {
+ServoBoard.prototype._servoUpdate = function () {
 	var	self = this,
 		differentThanLatestGoal = false,
-		SERVOS_GOAL = [self.instructions.input.SERVOS_GOAL],
+		SERVOS_GOAL = [],
 		SERVOS_ENABLED = 0,
 		SERVOS_CALIBRATE = 0,
-		instruction;
+		instruction,
+		LATEST_SERVOS_GOAL = self.latestInstructions.SERVOS_GOAL;
 
-	self.servos.forEach(function(servo, i) {
+	self.servos.forEach(function (servo, i) {
 		if(typeof servo.goal !== 'number') {
 			servo.goal = 0;
 		}
@@ -152,8 +195,7 @@ ServoBoard.prototype._servoUpdate = function() {
 		}
 
 		SERVOS_GOAL.push(self.map(servo.goal, 0, 1, 0, 254, true));
-
-		if(servo.goal !== self.latestInstructions.SERVOS_GOAL[i]) {
+		if(SERVOS_GOAL[i] !== LATEST_SERVOS_GOAL[i + 1]) {
 			differentThanLatestGoal = true;
 		}
 
@@ -165,18 +207,19 @@ ServoBoard.prototype._servoUpdate = function() {
 			SERVOS_CALIBRATE += 1 << i;
 			servo._calibrate = false;
 		}
-
 	});
 
 	if(
 		differentThanLatestGoal ||
-		SERVOS_GOAL.length !== self.latestInstructions.SERVOS_GOAL.length
+		SERVOS_GOAL.length !== self.latestInstructions.SERVOS_GOAL.length - 1
 	) {
 		self._clearInstructionsFromQueueByType(self.instructions.input.SERVOS_GOAL);
-		self._enqueue(SERVOS_GOAL);
+		self._enqueue(SERVOS_GOAL.unshift(self.instructions.input.SERVOS_GOAL));
+		self.latestInstructions.SERVOS_GOAL = SERVOS_GOAL;
 	}
 
-	if(SERVOS_ENABLED !== self.latestInstructions.SERVOS_ENABLED) {
+	/* These cannot be sent as 16-bit as that could lead to sending a 255 byte that is the same as end of transmission
+	 * if(SERVOS_ENABLED !== self.latestInstructions.SERVOS_ENABLED) {
 		instruction = self.instructions.input.SERVOS_ENABLED;
 		self._clearInstructionsFromQueueByType(instruction);
 		self._enqueue([instruction, SERVOS_ENABLED]);
@@ -186,14 +229,14 @@ ServoBoard.prototype._servoUpdate = function() {
 		instruction = self.instructions.input.SERVOS_CALIBRATE;
 		self._clearInstructionsFromQueueByType(instruction);
 		self._enqueue([instruction, SERVOS_CALIBRATE]);
-	}
+	}*/
 
-	setTimeout(function() {
+	setTimeout(function () {
 		self._servoUpdate();
 	}, self.servoUpdateDelay);
 };
 
-ServoBoard.prototype._clearInstructionsFromQueueByType = function(type) {
+ServoBoard.prototype._clearInstructionsFromQueueByType = function (type) {
 	var i,
 		instruction = type + this._id << 4;
 
@@ -204,7 +247,7 @@ ServoBoard.prototype._clearInstructionsFromQueueByType = function(type) {
 	}
 };
 
-ServoBoard.prototype.getInputNameByCode = function(code) {
+ServoBoard.prototype.getInputNameByCode = function (code) {
 	var instructions = this.instructions.input, i;
 
 	for(i in instructions) {
@@ -219,7 +262,7 @@ ServoBoard.prototype.getInputNameByCode = function(code) {
 	return null;
 };
 
-ServoBoard.prototype.getOutputNameByCode = function(code) {
+ServoBoard.prototype.getOutputNameByCode = function (code) {
 	var instructions = this.instructions.output, i;
 
 	for(i in instructions) {
@@ -234,7 +277,7 @@ ServoBoard.prototype.getOutputNameByCode = function(code) {
 	return null;
 };
 
-ServoBoard.prototype.getErrorByCode = function(code) {
+ServoBoard.prototype.getErrorByCode = function (code) {
 	var errors = this.instructions.error, i;
 
 	for(i in errors) {
@@ -249,50 +292,64 @@ ServoBoard.prototype.getErrorByCode = function(code) {
 	return errors.UNKNOWN;
 };
 
-ServoBoard.prototype.getId = function() {
+ServoBoard.prototype.getId = function () {
 	return this._id;
 };
 
-ServoBoard.prototype.setId = function(id) {
+ServoBoard.prototype.setId = function (id) {
 	if(id < 0 || id > 15) {
 		throw 'Servo Board id must be in the range 0-15';
 	}
 
 	this._id = id;
-	this._enqueue(this.instructions.SET_ID, id);
+	this._enqueue([this.instructions.SET_ID, id]);
 };
 
-ServoBoard.prototype.debugEnable = function() {
-	this._enqueue(this.instructions.DEBUG_ENABLE);
+ServoBoard.prototype.debugEnable = function () {
+	this._enqueue([this.instructions.DEBUG_ENABLE]);
 };
 
-ServoBoard.prototype.debugDisable = function() {
-	this._enqueue(this.instructions.DEBUG_DISABLE);
+ServoBoard.prototype.debugDisable = function () {
+	this._enqueue([this.instructions.DEBUG_DISABLE]);
 };
 
-ServoBoard.prototype._enqueue = function() {
-	arguments[0] += this._id << 4; // Add the servo board id to the first argument
-	arguments[arguments.length] = this.instructions.END_OF_INSTRUCTION;
-	this._queue.push(new Buffer(arguments));
+ServoBoard.prototype._enqueue = function (args) {
+	if(args) {
+		args[0] += this._id << 4; // Add the servo board id to the first argument
+		args[args.length] = this.instructions.END_OF_INSTRUCTION;
+		this._queue.push(new Buffer(args));
+	}
 };
 
-ServoBoard.prototype._send = function() {
+ServoBoard.prototype._send = function () {
 	var self = this;
 
 	if(self._boardReady && self._queue.length > 0) {
-		self._connection.write(self._queue.shift(), function() {
+console.log('sending', self._queue[0]);
+		self._connection.write(self._queue.shift(), function () {
 			// TODO: figure out what to do on error here
+//~ console.log('serial sent',arguments);
 			self._send();
 		});
 	}
 	else {
-		setTimeout(function() {
+		setTimeout(function () {
 			self._send();
 		}, self.sendRetryDelay);
 	}
 };
 
-ServoBoard.prototype._dataHandler = function(data) {
+ServoBoard.prototype._byteArrayToString = function (array) {
+	var str = '';
+
+	array.forEach(function (byte) {
+		str += String.fromCharCode(byte);
+	});
+
+	return str;
+};
+
+ServoBoard.prototype._dataHandler = function (data) {
 	var	self = this,
 		id = data[0] >> 4,
 		instruction = data[0] & 0x0f,
@@ -302,23 +359,25 @@ ServoBoard.prototype._dataHandler = function(data) {
 
 	data.shift();
 
-	if(id === self._id && data.length === 16 && instructionName) {
+console.log(instruction, instructionName);
+	if(id === self._id && instructionName) {
+console.log('passed!!');
 		switch(instruction) {
 			case outputInstructions.READY:
 				self.emit('connect');
 				self._boardReady = true;
 				break;
 			case outputInstructions.INFO:
-				this.emit('info', data);
+				self.emit('info', self._byteArrayToString(data));
 				break;
 			case outputInstructions.DEBUG:
-				this.emit('debug', data);
+				self.emit('debug', self._byteArrayToString(data));
 				break;
 			case outputInstructions.ERROR:
 				self.emit('error', self.getErrorByCode(data[0]));
 				break;
 			case outputInstructions.ALL_SERVOS_POSITION:
-				data.forEach(function(position, i) {
+				data.forEach(function (position, i) {
 					temp = self.servos[i];
 					if(temp instanceof Servo) {
 						temp.position = self.map(position, 0, 254, 0, 1);
@@ -326,7 +385,7 @@ ServoBoard.prototype._dataHandler = function(data) {
 				});
 				break;
 			case outputInstructions.ALL_SERVOS_LOAD:
-				data.forEach(function(load, i) {
+				data.forEach(function (load, i) {
 					temp = self.servos[i];
 					if(temp instanceof Servo) {
 						temp.load = self.map(load, 0, 254, 0, 1);
@@ -339,7 +398,7 @@ ServoBoard.prototype._dataHandler = function(data) {
 	}
 };
 
-ServoBoard.prototype._errorHandler = function(error) { // Connection errors
+ServoBoard.prototype._errorHandler = function (error) { // Connection errors
 	this.emit('error', this.instructions.error.NO_CONNECTION);
 };
 
@@ -359,6 +418,6 @@ var Servo = function Servo(index, servoBoard) {
 Servo.prototype.__proto__ = EventEmitter.prototype;
 
 // Servo methods
-Servo.prototype.calibrate = function() {
+Servo.prototype.calibrate = function () {
 	return this._calibrate = true;
 };

@@ -1,43 +1,53 @@
 var ServoBoard = require('./servoboard.js'),
 	servoBoard = new ServoBoard();
 
-servoBoard.on('error', function(error) {
-	console.error('Servo Board:', error);
+servoBoard._id = 9;
+
+servoBoard.on('error', function (error) {
+	console.error('Servo Board ERROR:', error);
 });
 
-servoBoard.on('info', function(data) {
-	console.log('Servo Board:', data);
+servoBoard.on('info', function (data) {
+	console.log('Servo Board INFO:', data);
 });
 
-servoBoard.on('send', function(data) {
+servoBoard.on('debug', function (data) {
+	console.log('Servo Board DEBUG:', data);
+});
+
+servoBoard.on('send', function (data) {
 	console.log('Client:', data);
 });
 
-servoBoard.on('connect', function() {
-	var pos = 0;
+servoBoard.on('connect', function () {
+	var pos = 0, i;
 
 	console.log('Servo Board:', 'Connected!');
 
 	servoBoard.debugEnable();
-	for(var i = 0, l = servoBoard.servos.length; i < l; i++) {
+	servoBoard.debugEnable();
+	servoBoard.debugEnable();
+	for(i = 0, l = servoBoard.servos.length; i < l; i++) {
 		servoBoard.servos[i].isEnabled = true;
 	}
 
-	setInterval(function() {
+	setInterval(function () {
 		pos += .1;
 		if(pos > 1) {
 			pos = 0;
 		}
-		for(var i = 0, l = servoBoard.servos.length; i < l; i++) {
+
+		for(i = 0, l = servoBoard.servos.length; i < l; i++) {
 			servoBoard.servos[i].goal = pos;
 		}
 	}, 5000);
 });
 
-servoBoard.on('disconnect', function() {
+servoBoard.on('disconnect', function () {
 	console.log('Servo Board:', 'Disconnected!');
 });
 
-servoBoard.device = '/dev/ttyACM3';
+//~ servoBoard.device = '/dev/arduino';
+servoBoard.device = '/dev/ttyACM0';
 servoBoard.baudrate = 115200;
 servoBoard.connect();
