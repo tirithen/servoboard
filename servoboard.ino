@@ -16,6 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <avr/eeprom.h>
 #include <avr/interrupt.h>
 #include <avr/io.h>
 #include <SPI.h>
@@ -29,7 +30,7 @@ bool debugOutput = false;
 
 // SPI MOSI at pin 11
 // SPI SCLK at pin 13
-#define SPILATCHPIN 8 // SPI SS at pin 8
+#define SPI_PIN_LATCH 8 // SPI SS at pin 8
 
 #define SERVO_MIN_TIMEOUT 6200
 #define SERVO_MAX_TIMEOUT 59000
@@ -55,10 +56,11 @@ bool debugOutput = false;
 #define INSTRUCTION_OUTPUT_ALL_SERVOS_POSITION	4
 #define INSTRUCTION_OUTPUT_ALL_SERVOS_LOAD		5
 
-#define INSTRUCTION_ERROR_UNKNOWN 0
-//#define INSTRUCTION_ERROR_NO_CONNECTION 1 // Client only error
-#define INSTRUCTION_ERROR_INSTRUCTION_ILLEGAL 2
-//#define INSTRUCTION_ERROR_RESPONSE_ILLEGAL 3 // Client only error
+#define INSTRUCTION_ERROR_UNKNOWN				0
+//#define INSTRUCTION_ERROR_NO_CONNECTION		1 // Client only error
+#define INSTRUCTION_ERROR_INSTRUCTION_ILLEGAL	2
+//#define INSTRUCTION_ERROR_RESPONSE_ILLEGAL	3 // Client only error
+#define INSTRUCTION_ERROR_INVALID_BOARD_ID		4
 
 typedef struct
 {
@@ -68,8 +70,8 @@ typedef struct
 	//uint8_t loadPin; // TODO: implement
 	uint8_t goal;
 	uint16_t timeout;
-	uint16_t minTimeout;
-	uint16_t maxTimeout;
+	uint16_t *minTimeout;
+	uint16_t *maxTimeout;
 	uint8_t position;
 	uint8_t load;
 } ServoData_t;
@@ -79,6 +81,13 @@ typedef struct
 	uint16_t controlMask;
 	uint16_t timeout; // TODO: change to uint8_t if no more than 256 steps of resolution is possible
 } ServoGroup_t;
+
+struct settings_t
+{
+	uint8_t boardId;
+	uint16_t servosMinTimeout[SERVO_COUNT];
+	uint16_t servosMaxTimeout[SERVO_COUNT];
+} settings;
 
 ServoData_t servos[SERVO_COUNT];
 ServoGroup_t servoGroups[SERVO_COUNT];
@@ -91,16 +100,15 @@ bool timer2firstIteration = true;
 
 uint8_t serialInstruction[MAX_SERIAL_INSTRUCTION_LENGTH];
 
-uint8_t boardId = 0; // TODO: save this value to EEPROM
-
-void spi(uint16_t value) {
+void spi(uint16_t value)
+{
 	// Select the IC to tell it to expect data
-	digitalWriteFast(SPILATCHPIN, HIGH);
+	digitalWriteFast(SPI_PIN_LATCH, HIGH);
 	// Send 8 bits, MSB first, pulsing the clock after each bit
 	SPI.transfer(highByte(value));
 	SPI.transfer(lowByte(value));
 	// Lower the latch to apply the changes
-	digitalWriteFast(SPILATCHPIN, LOW);
+	digitalWriteFast(SPI_PIN_LATCH, LOW);
 }
 
 ISR(TIMER1_COMPA_vect) // This interrupt runs when it's time to stop the current servo group or stops this timer if all groups are done
@@ -117,8 +125,8 @@ ISR(TIMER1_COMPA_vect) // This interrupt runs when it's time to stop the current
 	}
 }
 
-ISR(TIMER2_COMPA_vect) // This interrupt will trigger every 10ms, half of the times (20ms) the servo pulses will be started
-{
+ISR(TIMER2_COMPA_vect)	// This interrupt will trigger every 10ms, half of the times (20ms)
+{						// the servo pulses will be started
 	// Slow down the speed of timer2 to half
 	if(timer2firstIteration == true) {
 		timer2firstIteration = false;
@@ -133,6 +141,37 @@ ISR(TIMER2_COMPA_vect) // This interrupt will trigger every 10ms, half of the ti
 
 		TIMSK1 |= _BV(OCIE1A); // Enable timer 1 compare A interrupt
 		TCCR1B |= _BV(CS10); // Set prescaler at 1
+	}
+}
+
+void saveSettings()
+{
+	eeprom_write_block((const void*)&settings, (void*)0, sizeof(settings));
+}
+
+void loadSettings()
+{
+	uint8_t i;
+
+	eeprom_read_block((void*)&settings, (void*)0, sizeof(settings));
+
+	for(i = 0; i < SERVO_COUNT; i++) { // Keep the servo max/min timeouts within reasonable limits
+		servos[i].minTimeout = &settings.servosMinTimeout[i];
+		servos[i].maxTimeout = &settings.servosMaxTimeout[i];
+
+		if(
+			settings.servosMinTimeout[i] < SERVO_MIN_TIMEOUT ||
+			settings.servosMinTimeout[i] > SERVO_MAX_TIMEOUT
+		) {
+			settings.servosMinTimeout[i] = SERVO_MIN_TIMEOUT;
+		}
+
+		if(
+			settings.servosMaxTimeout[i] > SERVO_MAX_TIMEOUT ||
+			settings.servosMaxTimeout[i] < SERVO_MIN_TIMEOUT
+		) {
+			settings.servosMaxTimeout[i] = SERVO_MAX_TIMEOUT;
+		}
 	}
 }
 
@@ -186,7 +225,7 @@ bool setServoGoal(uint8_t index, uint16_t goal, bool updateOrder)
 {
 	if(index < SERVO_COUNT && goal <= SERVO_MAX_GOAL) {
 		servos[index].goal = goal;
-		servos[index].timeout = map(goal, 0, SERVO_MAX_GOAL, servos[index].minTimeout, servos[index].maxTimeout);
+		servos[index].timeout = map(goal, 0, SERVO_MAX_GOAL, *servos[index].minTimeout, *servos[index].maxTimeout);
 
 		if(updateOrder) {
 			updateServoOrder();
@@ -211,8 +250,6 @@ void setupServosAndServoGroups()
 
 		// Setup servo
 		servos[i].controlMask = 1 << i;
-		servos[i].minTimeout = SERVO_MIN_TIMEOUT;
-		servos[i].maxTimeout = SERVO_MAX_TIMEOUT;
 		setServoGoal(i, 0, false);
 	}
 }
@@ -240,12 +277,14 @@ void serialEvent() // Serial data handler
 	}
 }
 
-void serialInputHandler() {
+void serialInputHandler()
+{
 	uint8_t i;
 
-	if(serialInstruction[0] >> 4 == boardId) { // If the first 4 bits matches this board id, continiue
+	if(serialInstruction[0] >> 4 == settings.boardId) { // If the first 4 bits matches this board id, continiue
 		serialInstruction[0] &= 0x00ff; // Remove the board id from the first byte, leave the instruction bits
 
+		// Set servos goal
 		if(serialInstruction[0] == INSTRUCTION_INPUT_SERVOS_GOAL) {
 			i = 1;
 
@@ -256,7 +295,16 @@ void serialInputHandler() {
 
 			updateServoOrder();
 			calculateServoGroups();
+
+#ifdef DEBUG
+			if(debugOutput) {
+				Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_DEBUG);
+				Serial.write("Updated servos goal");
+				Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
+			}
+#endif
 		}
+		// Set enabled state for servos
 		else if(serialInstruction[0] == INSTRUCTION_INPUT_SERVOS_ENABLED) {
 			for(i = 0; i < SERVO_COUNT; i++) {
 				if(((serialInstruction[1] >> i) & 1) == 1) {
@@ -266,55 +314,104 @@ void serialInputHandler() {
 					servos[i].isEnabled = false;
 				}
 			}
+
+#ifdef DEBUG
+			if(debugOutput) {
+				Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_DEBUG);
+				Serial.write("Enabled/disabled servos");
+				Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
+			}
+#endif
 		}
+		// Calibrate servos
 		else if(serialInstruction[0] == INSTRUCTION_INPUT_SERVOS_CALIBRATE) {
 			for(i = 0; i < SERVO_COUNT; i++) {
 				if(((serialInstruction[1] >> i) & 1) == 1) {
 					// TODO: Calibrate servo
 				}
 			}
+#ifdef DEBUG
+			if(debugOutput) {
+				Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_DEBUG);
+				Serial.write("Servo(s) calibrated");
+				Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
+			}
+#endif
 		}
+		// Set the board id
 		else if(serialInstruction[0] == INSTRUCTION_INPUT_SET_ID) {
 			if(serialInstruction[1] < 16) {
-				boardId = serialInstruction[1];
+				if(settings.boardId != serialInstruction[1]) {
+					settings.boardId = serialInstruction[1];
+					saveSettings();
+#ifdef DEBUG
+					if(debugOutput) {
+						Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_DEBUG);
+						Serial.write("Servo board id updated");
+						Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
+					}
+#endif
+				}
+				else {
+#ifdef DEBUG
+					if(debugOutput) {
+						Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_DEBUG);
+						Serial.write("Servo board id given is already set");
+						Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
+					}
+#endif
+
+				}
 			}
-			else {
-				// Send error
+			else { // Output invalid id
+				Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_ERROR);
+				Serial.write(INSTRUCTION_ERROR_INVALID_BOARD_ID);
+				Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
 			}
 		}
 #ifdef DEBUG
+		// Enable debug output
 		else if(serialInstruction[0] == INSTRUCTION_INPUT_DEBUG_ENABLE) {
 			debugOutput = true;
+			Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_INFO);
+			Serial.write("Debug output enabled");
+			Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
 		}
+		// Disable debug output
 		else if(serialInstruction[0] == INSTRUCTION_INPUT_DEBUG_DISABLE) {
 			debugOutput = false;
+			Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_INFO);
+			Serial.write("Debug output disabled");
+			Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
 		}
 #endif
+		// Output illegal instruction error
 		else {
-			// Output illegal instruction error
-			Serial.print((boardId << 4) + INSTRUCTION_OUTPUT_ERROR);
-			Serial.print(INSTRUCTION_ERROR_INSTRUCTION_ILLEGAL);
-			Serial.print(INSTRUCTION_END_OF_INSTRUCTION);
+			Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_ERROR);
+			Serial.write(INSTRUCTION_ERROR_INSTRUCTION_ILLEGAL);
+			Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
 		}
 	}
 }
 
-void serialOutputServoPositions() { // Output servo positions
+void serialOutputServoPositions() // Output servo positions
+{
 	uint8_t i;
-	Serial.print((boardId << 4) + INSTRUCTION_OUTPUT_ALL_SERVOS_POSITION);
+	Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_ALL_SERVOS_POSITION);
 	for(i = 0; i < SERVO_COUNT; i++) {
-		Serial.print(servos[i].position);
+		Serial.write(servos[i].position);
 	}
-	Serial.print(INSTRUCTION_END_OF_INSTRUCTION);
+	Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
 }
 
-void serialOutputServoLoads() { // Output servo loads
+void serialOutputServoLoads() // Output servo loads
+{
 	uint8_t i;
-	Serial.print((boardId << 4) + INSTRUCTION_OUTPUT_ALL_SERVOS_LOAD);
+	Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_ALL_SERVOS_LOAD);
 	for(i = 0; i < SERVO_COUNT; i++) {
-		Serial.print(servos[i].load);
+		Serial.write(servos[i].load);
 	}
-	Serial.print(INSTRUCTION_END_OF_INSTRUCTION);
+	Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
 }
 
 void setup()
@@ -323,6 +420,9 @@ void setup()
 	Serial.begin(115200);
 
 	noInterrupts();
+
+	// Load settings
+	loadSettings();
 
 	// Timer1 setup
 	TIMSK1 &= ~(_BV(ICIE1) | _BV(TOIE1) | _BV(OCIE1A) | _BV(OCIE1B));
@@ -348,27 +448,31 @@ void setup()
 	TIMSK2 |= _BV(OCIE2A);	// Enable timer 2 compare A interrupt
 
 	// Setup SPI
-	pinModeFast(SPILATCHPIN, OUTPUT);
+	pinModeFast(SPI_PIN_LATCH, OUTPUT);
 	SPI.setBitOrder(MSBFIRST); // Transmit most significant bit first when sending data with SPI
 	SPI.setClockDivider(SPI_CLOCK_DIV2);
 	SPI.begin();
 
 	// Setup the servo pin/mask configurations
-	// TODO: setup up servos
 	setupServosAndServoGroups();
-	// TODO: read calibration data from eeprom
-	// TODO: read initial servo goals from eeprom
-	// TODO: read which servos that are enabled from eeprom
 	updateServoOrder();
 	calculateServoGroups();
 
+	// Wait before sending next time to give the client a chance to handle last message
+	delay(100);
+
 	// Output end of instruction byte to make sure listners are in sync
 	// TODO: figure out if this is working
-	Serial.print(INSTRUCTION_END_OF_INSTRUCTION);
+	Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_INFO);
+	Serial.write("Servo Board starting...");
+	Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
+
+	// Wait before sending next time to give the client a chance to handle last message
+	delay(100);
 
 	// Output servo board ready
-	Serial.print((boardId << 4) + INSTRUCTION_OUTPUT_READY);
-	Serial.print(INSTRUCTION_END_OF_INSTRUCTION);
+	Serial.write((settings.boardId << 4) + INSTRUCTION_OUTPUT_READY);
+	Serial.write(INSTRUCTION_END_OF_INSTRUCTION);
 
 	interrupts();
 }
