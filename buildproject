@@ -1,4 +1,6 @@
-ARDUINO_HOME_VALUE=~/Programmering/Arduino/arduino-1.0/
+#!/bin/bash
+
+ARDUINO_HOME_VALUE=~/Programmering/Arduino/arduino-1.0.1/
 ARDUINO_PORT_VALUE=/dev/ttyACM0
 ARDUINO_VER_VALUE=100
 ARDUINO_BOARD_VALUE=uno
